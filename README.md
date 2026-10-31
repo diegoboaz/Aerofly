@@ -65,3 +65,4 @@ Este é um MVP propositalmente enxuto. Próximas evoluções:
 2. Alertas de SLA e notificações de cancelamento ao consumidor.
 3. Previsão de atrasos/cancelamentos com ML sobre o histórico.
 4. Perfis de acesso por companhia aérea.
+# Aerofly
