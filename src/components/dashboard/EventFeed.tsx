@@ -6,12 +6,13 @@ import {
   CheckCircle2,
   Clock3,
   PlaneTakeoff,
+  Radar,
   Users,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
 import type { EventRow } from "@/lib/types";
-import { getAirline } from "@/lib/aviation";
+import { AIRLINES } from "@/lib/aviation";
 import { relTime } from "@/lib/format";
 
 const TYPE_META: Record<EventRow["type"], { icon: LucideIcon; color: string; bg: string }> = {
@@ -20,15 +21,14 @@ const TYPE_META: Record<EventRow["type"], { icon: LucideIcon; color: string; bg:
   cancellation: { icon: XCircle, color: "#fb7185", bg: "rgba(251,113,133,0.1)" },
   delay: { icon: Clock3, color: "#fbbf24", bg: "rgba(251,191,36,0.1)" },
   boarding: { icon: Users, color: "#7dd3fc", bg: "rgba(125,211,252,0.1)" },
-  created: { icon: PlaneTakeoff, color: "#94a3b8", bg: "rgba(148,163,184,0.1)" },
+  created: { icon: Radar, color: "#e879f9", bg: "rgba(232,121,249,0.1)" },
 };
 
 const FILTERS = [
   { key: "all", label: "Todos" },
-  { key: "cancellation", label: "Cancelamentos" },
-  { key: "delay", label: "Atrasos" },
-  { key: "departure", label: "Partidas" },
-  { key: "arrival", label: "Chegadas" },
+  { key: "created", label: "Detecções" },
+  { key: "arrival", label: "Pousos" },
+  { key: "departure", label: "Decolagens" },
 ] as const;
 
 export default function EventFeed({ events }: { events: EventRow[] }) {
@@ -66,7 +66,8 @@ export default function EventFeed({ events }: { events: EventRow[] }) {
           {filtered.map((e) => {
             const meta = TYPE_META[e.type];
             const Icon = meta.icon;
-            const airlineColor = getAirline(e.airlineCode).color;
+            const airlineColor =
+              AIRLINES.find((a) => a.code === e.airlineCode)?.color ?? "#94a3b8";
             return (
               <motion.li
                 key={e.id}

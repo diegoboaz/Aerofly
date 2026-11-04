@@ -46,6 +46,7 @@ export const AIRPORTS: AirportMeta[] = [
   { code: "MAO", name: "Aeroporto Internacional de Manaus", city: "Manaus", state: "AM", lat: -3.0386, lon: -60.0497 },
   { code: "BEL", name: "Aeroporto Internacional de Belém", city: "Belém", state: "PA", lat: -1.3792, lon: -48.4763 },
   { code: "GYN", name: "Aeroporto Santa Genoveva", city: "Goiânia", state: "GO", lat: -16.632, lon: -49.2207 },
+  { code: "SLZ", name: "Aeroporto Internacional Marechal Cunha Machado", city: "São Luís", state: "MA", lat: -2.5854, lon: -44.2341 },
 ];
 
 export interface RouteMeta {
@@ -100,6 +101,17 @@ export const ROUTES: RouteMeta[] = [
   { origin: "FOR", destination: "SSA", blockMin: 105, dailyFreq: 2, airlines: ["AD"] },
   { origin: "POA", destination: "SDU", blockMin: 150, dailyFreq: 2, airlines: ["AD"] },
   { origin: "BEL", destination: "BSB", blockMin: 175, dailyFreq: 2, airlines: ["LA"] },
+  // São Luís (SLZ)
+  { origin: "GRU", destination: "SLZ", blockMin: 200, dailyFreq: 3, airlines: ["LA", "G3"] },
+  { origin: "SLZ", destination: "GRU", blockMin: 205, dailyFreq: 3, airlines: ["LA", "G3"] },
+  { origin: "BSB", destination: "SLZ", blockMin: 145, dailyFreq: 2, airlines: ["LA", "G3"] },
+  { origin: "SLZ", destination: "BSB", blockMin: 150, dailyFreq: 2, airlines: ["LA", "G3"] },
+  { origin: "BEL", destination: "SLZ", blockMin: 75, dailyFreq: 2, airlines: ["AD", "LA"] },
+  { origin: "SLZ", destination: "BEL", blockMin: 80, dailyFreq: 2, airlines: ["AD", "LA"] },
+  { origin: "FOR", destination: "SLZ", blockMin: 75, dailyFreq: 2, airlines: ["G3"] },
+  { origin: "SSA", destination: "SLZ", blockMin: 95, dailyFreq: 2, airlines: ["AD"] },
+  { origin: "REC", destination: "SLZ", blockMin: 110, dailyFreq: 1, airlines: ["AD"] },
+  { origin: "GIG", destination: "SLZ", blockMin: 190, dailyFreq: 1, airlines: ["LA"] },
 ];
 
 export const CANCELLATION_REASONS: { reason: string; weight: number }[] = [
@@ -111,17 +123,6 @@ export const CANCELLATION_REASONS: { reason: string; weight: number }[] = [
   { reason: "Fator operacional da companhia", weight: 10 },
 ];
 
-export const STATUS_META: Record<
-  string,
-  { label: string; color: string; soft: string }
-> = {
-  scheduled: { label: "Programado", color: "#94a3b8", soft: "rgba(148,163,184,0.14)" },
-  boarding: { label: "Embarcando", color: "#7dd3fc", soft: "rgba(125,211,252,0.14)" },
-  departed: { label: "Em voo", color: "#22d3ee", soft: "rgba(34,211,238,0.14)" },
-  completed: { label: "Concluído", color: "#34d399", soft: "rgba(52,211,153,0.14)" },
-  cancelled: { label: "Cancelado", color: "#fb7185", soft: "rgba(251,113,133,0.14)" },
-};
-
 export function getAirline(code: string): AirlineMeta {
   return AIRLINES.find((a) => a.code === code) ?? AIRLINES[0];
 }
@@ -129,3 +130,51 @@ export function getAirline(code: string): AirlineMeta {
 export function getAirport(code: string): AirportMeta | undefined {
   return AIRPORTS.find((a) => a.code === code);
 }
+
+// ------------------------------------------------------------
+// Dados reais (ADS-B): fases de voo e conversao ICAO -> IATA
+// ------------------------------------------------------------
+export interface PhaseMeta {
+  label: string;
+  color: string;
+  soft: string;
+}
+
+export const REAL_PHASE_META: Record<string, PhaseMeta> = {
+  climb: { label: "Subindo", color: "#7dd3fc", soft: "rgba(125,211,252,0.14)" },
+  cruise: { label: "Cruzeiro", color: "#34d399", soft: "rgba(52,211,153,0.14)" },
+  descent: { label: "Descendo", color: "#fbbf24", soft: "rgba(251,191,36,0.14)" },
+  ground: { label: "Em solo", color: "#94a3b8", soft: "rgba(148,163,184,0.14)" },
+};
+
+/** Fase real do voo a partir do estado ADS-B (razao vertical em m/s) */
+export function flightPhase(a: {
+  onGround: boolean;
+  vsMs: number | null;
+}): "climb" | "cruise" | "descent" | "ground" {
+  if (a.onGround) return "ground";
+  if (a.vsMs !== null && a.vsMs > 0.8) return "climb";
+  if (a.vsMs !== null && a.vsMs < -0.8) return "descent";
+  return "cruise";
+}
+
+/** ICAO -> IATA dos aeroportos monitorados (OpenSky entrega ICAO) */
+export const ICAO_TO_IATA: Record<string, string> = {
+  SBGR: "GRU",
+  SBSP: "CGH",
+  SBRJ: "SDU",
+  SBGL: "GIG",
+  SBBR: "BSB",
+  SBCF: "CNF",
+  SBVT: "VIX",
+  SBPA: "POA",
+  SBCT: "CWB",
+  SBFL: "FLN",
+  SBSV: "SSA",
+  SBRF: "REC",
+  SBFZ: "FOR",
+  SBEG: "MAO",
+  SBBE: "BEL",
+  SBGO: "GYN",
+  SBSL: "SLZ",
+};

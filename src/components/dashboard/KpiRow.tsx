@@ -3,16 +3,16 @@
 import { useEffect, useState } from "react";
 import { animate } from "framer-motion";
 import {
-  CheckCircle2,
-  Clock3,
+  Building2,
   Gauge,
+  History,
   Plane,
-  PlaneTakeoff,
-  XCircle,
+  PlaneLanding,
+  Radar,
   type LucideIcon,
 } from "lucide-react";
-import type { Kpis } from "@/lib/types";
-import { ptInt, ptNum } from "@/lib/format";
+import type { RealKpis } from "@/lib/types";
+import { ptInt } from "@/lib/format";
 
 function useAnimatedNumber(target: number): number {
   const [value, setValue] = useState(target);
@@ -31,20 +31,20 @@ function useAnimatedNumber(target: number): number {
 function KpiCard({
   label,
   value,
+  displayOverride,
   format = (v: number) => ptInt(Math.round(v)),
   icon: Icon,
   accent,
   sub,
-  children,
   pulse = false,
 }: {
   label: string;
   value: number;
+  displayOverride?: string;
   format?: (v: number) => string;
   icon: LucideIcon;
   accent: string;
   sub?: string;
-  children?: React.ReactNode;
   pulse?: boolean;
 }) {
   const animated = useAnimatedNumber(value);
@@ -60,7 +60,7 @@ function KpiCard({
             {label}
           </p>
           <p className="mt-2 font-mono text-[30px] font-semibold leading-none text-slate-100">
-            {format(animated)}
+            {displayOverride ?? format(animated)}
           </p>
         </div>
         <span
@@ -75,75 +75,70 @@ function KpiCard({
         </span>
       </div>
       {sub && <p className="mt-2.5 truncate text-[11px] text-slate-500">{sub}</p>}
-      {children}
     </div>
   );
 }
 
-export default function KpiRow({ kpis }: { kpis: Kpis }) {
-  const rateTone =
-    kpis.cancellationRate <= 2
-      ? "#34d399"
-      : kpis.cancellationRate <= 3.5
-        ? "#fbbf24"
-        : "#fb7185";
+export default function KpiRow({ kpis }: { kpis: RealKpis }) {
+  const inAirPct =
+    kpis.trackedNow > 0
+      ? Math.round((kpis.airborne / kpis.trackedNow) * 100)
+      : 0;
 
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
       <KpiCard
-        label="Voos hoje"
-        value={kpis.totalToday}
-        icon={PlaneTakeoff}
+        label="Rastreadas agora"
+        value={kpis.trackedNow}
+        icon={Radar}
         accent="#22d3ee"
-        sub={`${kpis.scheduled} programados restantes`}
-      />
-      <KpiCard
-        label="Concluídos"
-        value={kpis.completed}
-        icon={CheckCircle2}
-        accent="#34d399"
-        sub={`${ptNum(kpis.onTimeRate)}% dentro do horário`}
-      />
-      <KpiCard
-        label="Em voo agora"
-        value={kpis.inFlight}
-        icon={Plane}
-        accent="#7dd3fc"
-        sub={`${kpis.boarding} em embarque`}
+        sub="sensores ADS-B · Brasil"
         pulse
       />
       <KpiCard
-        label="Atrasados"
-        value={kpis.delayed}
-        icon={Clock3}
-        accent="#fbbf24"
-        sub={kpis.delayed > 0 ? `média de ${kpis.avgDelay} min` : "sem atrasos relevantes"}
+        label="Em voo"
+        value={kpis.airborne}
+        icon={Plane}
+        accent="#34d399"
+        sub={`${inAirPct}% do total rastreado`}
       />
       <KpiCard
-        label="Cancelados"
-        value={kpis.cancelled}
-        icon={XCircle}
+        label="Em solo"
+        value={kpis.onGround}
+        icon={PlaneLanding}
+        accent="#94a3b8"
+        sub="sinal em aeroportos"
+      />
+      <KpiCard
+        label="Voos reais · 90 min"
+        value={kpis.recent90min ?? 0}
+        displayOverride={kpis.recent90min === null ? "—" : undefined}
+        icon={History}
+        accent="#a78bfa"
+        sub={
+          kpis.recent90min === null
+            ? "restrita no modo anônimo — use FR24_API_TOKEN"
+            : "janela OpenSky /flights/all"
+        }
+      />
+      <KpiCard
+        label="Cias. monitoradas"
+        value={kpis.monitoredAirborne}
+        icon={Building2}
         accent="#fb7185"
-        sub="voos suprimidos hoje"
+        sub="GOL · LATAM · Azul · Voepass em voo"
       />
       <KpiCard
-        label="Taxa de cancelamento"
-        value={kpis.cancellationRate}
-        format={(v) => `${ptNum(v)}%`}
+        label="Nível médio de voo"
+        value={kpis.medianFlightLevel ?? 0}
+        displayOverride={
+          kpis.medianFlightLevel ? `FL${kpis.medianFlightLevel}` : "—"
+        }
+        format={(v) => `FL${Math.round(v)}`}
         icon={Gauge}
-        accent={rateTone}
-        sub="meta operacional ≤ 3%"
-      >
-        <div className="mt-2.5 h-1.5 w-full overflow-hidden rounded-full bg-white/[0.06]">
-          <div
-            className="h-full rounded-full transition-all duration-700"
-            style={{
-              width: `${Math.min(100, (kpis.cancellationRate / 5) * 100)}%`,
-              background: `linear-gradient(90deg, ${rateTone}88, ${rateTone})`,
-            }}
-          />
-        </div>
-      </KpiCard>
+        accent="#fbbf24"
+        sub="altitude mediana em cruzeiro"
+      />
     </div>
   );
 }

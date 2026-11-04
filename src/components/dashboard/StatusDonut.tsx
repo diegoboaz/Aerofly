@@ -1,14 +1,14 @@
 "use client";
 
 import { Cell, Pie, PieChart, ResponsiveContainer } from "recharts";
-import type { DashboardData } from "@/lib/types";
+import type { PhaseSlice } from "@/lib/types";
 import { ptNum } from "@/lib/format";
 
 export default function StatusDonut({
   data,
   total,
 }: {
-  data: DashboardData["statusDistribution"];
+  data: PhaseSlice[];
   total: number;
 }) {
   return (
@@ -41,7 +41,7 @@ export default function StatusDonut({
               {total}
             </p>
             <p className="mt-1 text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-500">
-              voos hoje
+              aeronaves
             </p>
           </div>
         </div>

@@ -1,208 +1,128 @@
 import { db } from "@/db";
-import { flightEvents, flights, pipelineRuns } from "@/db/schema";
-import { AIRLINES, STATUS_META } from "@/lib/aviation";
-import { ensureSeeded, startOfSpDay } from "@/lib/simulation";
-import type {
-  DashboardData,
-  EventRow,
-  FlightRow,
-  HourlyPoint,
-  MapFlight,
-} from "@/lib/types";
-import { and, desc, gte, lt, sql } from "drizzle-orm";
+import { flightEvents, pipelineRuns } from "@/db/schema";
+import {
+  AIRLINES,
+  ICAO_TO_IATA,
+  REAL_PHASE_META,
+  flightPhase,
+} from "@/lib/aviation";
+import {
+  getLiveTraffic,
+  getRecentRealFlights,
+  getTrails,
+} from "@/lib/liveTraffic";
+import { buildInsights } from "@/lib/insights";
+import { estimateDestination } from "@/lib/geo";
+import { startOfSpDay } from "@/lib/time";
+import type { DashboardData, EventRow, RealRouteStat } from "@/lib/types";
+import { desc, sql } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
-const SP_OFFSET_MS = 3 * 3600_000;
-const spHour = (d: Date) => new Date(d.getTime() - SP_OFFSET_MS).getUTCHours();
-
-function toRow(f: typeof flights.$inferSelect): FlightRow {
-  return {
-    id: f.id,
-    flightNumber: f.flightNumber,
-    airlineCode: f.airlineCode,
-    originCode: f.originCode,
-    destinationCode: f.destinationCode,
-    status: f.status,
-    delayMinutes: f.delayMinutes,
-    cancellationReason: f.cancellationReason,
-    scheduledDeparture: f.scheduledDeparture.toISOString(),
-    scheduledArrival: f.scheduledArrival.toISOString(),
-    actualDeparture: f.actualDeparture?.toISOString() ?? null,
-    actualArrival: f.actualArrival?.toISOString() ?? null,
-    blockMinutes: f.blockMinutes,
-  };
-}
-
 export async function GET() {
   try {
-    await ensureSeeded("web");
-
-    const startToday = startOfSpDay(0);
-    const endToday = startOfSpDay(1);
-    const nowMs = Date.now();
-
-    const [todayFlights, recentEvents, lastRuns, totals] = await Promise.all([
-      db
-        .select()
-        .from(flights)
-        .where(
-          and(
-            gte(flights.scheduledDeparture, startToday),
-            lt(flights.scheduledDeparture, endToday),
-          ),
-        ),
-      db
-        .select()
-        .from(flightEvents)
-        .orderBy(desc(flightEvents.createdAt))
-        .limit(45),
+    const [traffic, recent, trails, recentEvents, lastRuns, agg] = await Promise.all([
+      getLiveTraffic(),
+      getRecentRealFlights(),
+      getTrails(75),
+      db.select().from(flightEvents).orderBy(desc(flightEvents.createdAt)).limit(45),
       db.select().from(pipelineRuns).orderBy(desc(pipelineRuns.createdAt)).limit(1),
       db.execute(sql`
         SELECT
-          (SELECT COUNT(*)::int FROM flights) AS total_flights,
+          (SELECT COUNT(*)::int FROM live_traffic) AS snapshots,
           (SELECT COUNT(*)::int FROM flight_events) AS total_events,
           (SELECT COUNT(*)::int FROM pipeline_runs) AS total_runs
       `),
     ]);
 
-    // ----- KPIs -----
-    const totalToday = todayFlights.length;
-    const byStatus = (s: string) => todayFlights.filter((f) => f.status === s);
-    const completed = byStatus("completed");
-    const cancelled = byStatus("cancelled");
-    const inFlight = byStatus("departed");
-    const boarding = byStatus("boarding");
-    const delayed = todayFlights.filter(
-      (f) => f.status !== "cancelled" && f.delayMinutes >= 15,
-    );
-    const cancellationRate = totalToday ? (cancelled.length / totalToday) * 100 : 0;
-    const onTimeRate = completed.length
-      ? (completed.filter((f) => f.delayMinutes < 15).length / completed.length) * 100
-      : 100;
-    const avgDelay = delayed.length
-      ? Math.round(delayed.reduce((s, f) => s + f.delayMinutes, 0) / delayed.length)
-      : 0;
+    const startToday = startOfSpDay(0);
 
-    // ----- Distribuicao por status -----
-    const statusDistribution = Object.entries(STATUS_META).map(
-      ([status, meta]) => ({
-        status,
-        label: meta.label,
-        color: meta.color,
-        count: byStatus(status).length,
-      }),
-    );
-
-    // ----- Por companhia -----
-    const airlines = AIRLINES.map((a) => {
-      const mine = todayFlights.filter((f) => f.airlineCode === a.code);
-      const myCompleted = mine.filter((f) => f.status === "completed");
-      const myCancelled = mine.filter((f) => f.status === "cancelled");
-      return {
-        code: a.code,
-        name: a.name,
-        color: a.color,
-        total: mine.length,
-        completed: myCompleted.length,
-        cancelled: myCancelled.length,
-        delayed: mine.filter((f) => f.status !== "cancelled" && f.delayMinutes >= 15)
-          .length,
-        inFlight: mine.filter((f) => f.status === "departed").length,
-        cancelRate: mine.length ? (myCancelled.length / mine.length) * 100 : 0,
-        onTimeRate: myCompleted.length
-          ? (myCompleted.filter((f) => f.delayMinutes < 15).length /
-              myCompleted.length) *
-            100
-          : 100,
-      };
-    }).sort((a, b) => b.total - a.total);
-
-    // ----- Por hora (fuso SP) -----
-    const hours = new Map<number, HourlyPoint>();
-    for (let h = 5; h <= 23; h++) {
-      hours.set(h, { hour: String(h).padStart(2, "0"), total: 0, completed: 0, cancelled: 0, delayed: 0 });
-    }
-    for (const f of todayFlights) {
-      const h = spHour(f.scheduledDeparture);
-      const p = hours.get(h);
-      if (!p) continue;
-      p.total++;
-      if (f.status === "completed") p.completed++;
-      if (f.status === "cancelled") p.cancelled++;
-      else if (f.delayMinutes >= 15) p.delayed++;
-    }
-    const hourly = [...hours.values()];
-
-    // ----- Principais rotas -----
-    const routeMap = new Map<string, { total: number; completed: number; cancelled: number }>();
-    for (const f of todayFlights) {
-      const key = `${f.originCode}→${f.destinationCode}`;
-      const r = routeMap.get(key) ?? { total: 0, completed: 0, cancelled: 0 };
-      r.total++;
-      if (f.status === "completed") r.completed++;
-      if (f.status === "cancelled") r.cancelled++;
-      routeMap.set(key, r);
-    }
-    const topRoutes = [...routeMap.entries()]
-      .map(([route, r]) => ({
-        route,
-        origin: route.split("→")[0],
-        destination: route.split("→")[1],
-        total: r.total,
-        completed: r.completed,
-        cancelled: r.cancelled,
-        cancelRate: r.total ? (r.cancelled / r.total) * 100 : 0,
-      }))
-      .sort((a, b) => b.total - a.total)
-      .slice(0, 6);
-
-    // ----- Voos no mapa (em voo agora) -----
-    const mapFlights: MapFlight[] = inFlight
-      .map((f) => {
-        const dep = (f.actualDeparture ?? f.scheduledDeparture).getTime();
-        const progress = Math.min(
-          0.98,
-          Math.max(0.02, (nowMs - dep) / (f.blockMinutes * 60000)),
-        );
-        const meta = AIRLINES.find((a) => a.code === f.airlineCode);
-        return {
-          id: f.id,
-          flightNumber: f.flightNumber,
-          airlineCode: f.airlineCode,
-          airlineColor: meta?.color ?? "#22d3ee",
-          originCode: f.originCode,
-          destinationCode: f.destinationCode,
-          progress,
-          delayMinutes: f.delayMinutes,
-          blockMinutes: f.blockMinutes,
-        };
-      })
-      .sort((a, b) => a.progress - b.progress)
-      .slice(-26);
-
-    // ----- Atividade por aeroporto -----
-    const actMap = new Map<string, { active: number; cancelledToday: number }>();
-    for (const f of todayFlights) {
-      for (const code of [f.originCode, f.destinationCode]) {
-        const a = actMap.get(code) ?? { active: 0, cancelledToday: 0 };
-        if (f.status === "departed" || f.status === "boarding") a.active++;
-        if (f.status === "cancelled") a.cancelledToday++;
-        actMap.set(code, a);
-      }
-    }
-    const airportActivity = [...actMap.entries()].map(([code, a]) => ({
-      code,
-      ...a,
+    // ----- fases reais de voo (razao vertical + solo) -----
+    const phaseCount: Record<string, number> = {
+      climb: 0,
+      cruise: 0,
+      descent: 0,
+      ground: 0,
+    };
+    for (const a of traffic.aircraft) phaseCount[flightPhase(a)]++;
+    const phases = Object.entries(REAL_PHASE_META).map(([status, meta]) => ({
+      status,
+      label: meta.label,
+      color: meta.color,
+      count: phaseCount[status] ?? 0,
     }));
 
-    // ----- Voos recentes (primeira pagina da tabela) -----
-    const recentFlights = todayFlights
-      .sort(
-        (a, b) => b.scheduledDeparture.getTime() - a.scheduledDeparture.getTime(),
-      )
-      .slice(0, 14)
-      .map(toRow);
+    // ----- companhias monitoradas (real) -----
+    const detectedTodayRows = (
+      await db.execute(sql`
+        SELECT airline_code AS code, COUNT(DISTINCT icao24)::int AS n
+        FROM live_traffic
+        WHERE seen_at >= ${startToday} AND airline_code IS NOT NULL
+        GROUP BY airline_code
+      `)
+    ).rows as unknown as { code: string; n: number }[];
+    const detectedToday = new Map(detectedTodayRows.map((r) => [r.code, r.n]));
+
+    const airlines = AIRLINES.map((a) => ({
+      code: a.code,
+      name: a.name,
+      color: a.color,
+      inAirNow: traffic.aircraft.filter((x) => x.airline === a.code && !x.onGround)
+        .length,
+      detectedToday: detectedToday.get(a.code) ?? 0,
+    })).sort((x, y) => y.inAirNow - x.inAirNow);
+
+    // ----- aeronaves distintas por hora (historico real do dia) -----
+    const hourlyRows = (
+      await db.execute(sql`
+        SELECT to_char(seen_at AT TIME ZONE 'America/Sao_Paulo', 'HH24') AS hh,
+               COUNT(DISTINCT icao24)::int AS n
+        FROM live_traffic
+        WHERE seen_at >= ${startToday}
+        GROUP BY hh
+      `)
+    ).rows as unknown as { hh: string; n: number }[];
+    const hourlyMap = new Map(hourlyRows.map((r) => [r.hh, r.n]));
+    const hourly = Array.from({ length: 19 }, (_, i) => {
+      const hh = String(i + 5).padStart(2, "0");
+      return { hour: hh, aircraft: hourlyMap.get(hh) ?? 0 };
+    });
+
+    // ----- rotas reais (voos recentes OpenSky + rotas IATA do FR24) -----
+    const routeMap = new Map<string, RealRouteStat>();
+    const bump = (origin: string | null, destination: string | null) => {
+      if (!origin || !destination || origin === destination) return;
+      const key = `${origin}→${destination}`;
+      const r = routeMap.get(key) ?? {
+        route: key,
+        origin,
+        destination,
+        flights: 0,
+      };
+      r.flights++;
+      routeMap.set(key, r);
+    };
+    for (const f of recent.flights) {
+      bump(
+        f.fromIcao ? (ICAO_TO_IATA[f.fromIcao] ?? null) : null,
+        f.toIcao ? (ICAO_TO_IATA[f.toIcao] ?? null) : null,
+      );
+    }
+    for (const a of traffic.aircraft) {
+      if (a.origIata && a.destIata) bump(a.origIata, a.destIata);
+    }
+    const topRoutes = [...routeMap.values()]
+      .sort((a, b) => b.flights - a.flights)
+      .slice(0, 6);
+
+    // ----- KPIs reais -----
+    const airborneAltM = traffic.aircraft
+      .filter((a) => !a.onGround && a.altM !== null)
+      .map((a) => a.altM!)
+      .sort((x, y) => x - y);
+    const medianAltM = airborneAltM.length
+      ? airborneAltM[Math.floor(airborneAltM.length / 2)]
+      : null;
 
     const events: EventRow[] = recentEvents.map((e) => ({
       id: e.id,
@@ -215,29 +135,49 @@ export async function GET() {
       createdAt: e.createdAt.toISOString(),
     }));
 
-    const totalsRow = (totals as unknown as { rows: Record<string, number>[] }).rows?.[0] ?? {};
+    const totals = (agg.rows as Record<string, number>[])[0] ?? {};
+
+    // ----- insights operacionais (regras sobre dados reais) -----
+    const { insights, pressureScore, airportActivity } = buildInsights(
+      traffic.aircraft,
+      hourly,
+      events,
+    );
 
     const data: DashboardData = {
       generatedAt: new Date().toISOString(),
+      source: traffic.source,
+      auth: traffic.auth,
+      stale: traffic.stale,
+      cacheAgeSec: traffic.cacheAgeSec,
       kpis: {
-        totalToday,
-        completed: completed.length,
-        inFlight: inFlight.length,
-        boarding: boarding.length,
-        scheduled: byStatus("scheduled").length,
-        delayed: delayed.length,
-        cancelled: cancelled.length,
-        cancellationRate,
-        onTimeRate,
-        avgDelay,
+        trackedNow: traffic.count,
+        airborne: traffic.airborne,
+        onGround: traffic.onGround,
+        recent90min: recent.available ? recent.flights.length : null,
+        monitoredAirborne: airlines.reduce((s, a) => s + a.inAirNow, 0),
+        medianFlightLevel: medianAltM
+          ? Math.round((medianAltM * 3.28084) / 100)
+          : null,
       },
-      statusDistribution,
+      phases,
       airlines,
       hourly,
       topRoutes,
-      mapFlights,
-      airportActivity,
-      recentFlights,
+      aircraft: traffic.aircraft.map((a) => ({
+        ...a,
+        // destino real do FR24 tem prioridade; senao, estima pela trajetoria
+        destEstimate: a.destIata
+          ? null
+          : estimateDestination({
+              lat: a.lat,
+              lon: a.lon,
+              track: a.track,
+              altM: a.altM,
+              vsMs: a.vsMs,
+              onGround: a.onGround,
+            }),
+      })),
       events,
       pipeline: {
         lastRun: lastRuns[0]
@@ -251,13 +191,20 @@ export async function GET() {
               cancelled: lastRuns[0].cancelled,
             }
           : null,
-        totalRuns: totalsRow.total_runs ?? 0,
-        totalFlights: totalsRow.total_flights ?? 0,
-        totalEvents: totalsRow.total_events ?? 0,
+        totalRuns: totals.total_runs ?? 0,
+        adsbSnapshots: totals.snapshots ?? 0,
+        totalEvents: totals.total_events ?? 0,
       },
+      recentFlightsAvailable: recent.available,
+      insights,
+      pressureScore,
+      airportActivity,
+      trails,
     };
 
-    return Response.json(data);
+    return Response.json(data, {
+      headers: { "Cache-Control": "no-store" },
+    });
   } catch (err) {
     console.error("dashboard error", err);
     return Response.json(

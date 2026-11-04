@@ -1,5 +1,77 @@
-// Tipos compartilhados entre API e componentes do dashboard
+// Tipos compartilhados entre API e componentes do dashboard (dados REAIS)
 
+export interface EventRow {
+  id: number;
+  flightNumber: string;
+  airlineCode: string;
+  originCode: string;
+  destinationCode: string;
+  type: "created" | "boarding" | "departure" | "arrival" | "delay" | "cancellation";
+  message: string;
+  createdAt: string;
+}
+
+// ---- Trafego real (ADS-B / OpenSky / FlightRadar24) ----
+
+export interface LiveAircraft {
+  hex: string;
+  callsign: string | null;
+  airline: string | null;
+  country: string;
+  lat: number;
+  lon: number;
+  altM: number | null;
+  speedKmh: number | null;
+  track: number | null;
+  vsMs: number | null;
+  onGround: boolean;
+  // enriquecimento quando a fonte fornece rota (ex.: FlightRadar24 "full")
+  flightNumber?: string | null;
+  origIata?: string | null;
+  destIata?: string | null;
+  /** destino estimado pela trajetoria quando a fonte nao informa a rota */
+  destEstimate?: string | null;
+}
+
+/** Rastro real percorrido por uma aeronave (histórico de posições) */
+export interface Trail {
+  hex: string;
+  callsign: string | null;
+  airline: string | null;
+  points: [number, number][]; // [lat, lon]
+}
+
+export interface LiveTrafficData {
+  updatedAt: string;
+  source: "opensky" | "flightradar24";
+  auth: "oauth2" | "anonymous" | "api-key";
+  count: number;
+  airborne: number;
+  onGround: number;
+  stale: boolean;
+  cacheAgeSec: number;
+  aircraft: LiveAircraft[];
+}
+
+// ---- Voos reais recentes (OpenSky /flights/all) ----
+
+export interface RealRouteFlight {
+  callsign: string | null;
+  airline: string | null;
+  fromIcao: string | null;
+  toIcao: string | null;
+  firstSeen: number; // epoch s
+  lastSeen: number; // epoch s
+}
+
+export interface FlightsPage {
+  flights: FlightRow[];
+  total: number;
+  page: number;
+  pages: number;
+}
+
+/** @deprecated legado da malha simulada — mantido para compat do banco */
 export interface FlightRow {
   id: number;
   flightNumber: string;
@@ -16,77 +88,53 @@ export interface FlightRow {
   blockMinutes: number;
 }
 
-export interface EventRow {
-  id: number;
-  flightNumber: string;
-  airlineCode: string;
-  originCode: string;
-  destinationCode: string;
-  type: "created" | "boarding" | "departure" | "arrival" | "delay" | "cancellation";
-  message: string;
-  createdAt: string;
+// ---- Aggregados REAIS do dashboard ----
+
+export interface RealKpis {
+  trackedNow: number;
+  airborne: number;
+  onGround: number;
+  recent90min: number | null; // null = fonte indisponivel
+  monitoredAirborne: number;
+  medianFlightLevel: number | null;
 }
 
-export interface Kpis {
-  totalToday: number;
-  completed: number;
-  inFlight: number;
-  boarding: number;
-  scheduled: number;
-  delayed: number;
-  cancelled: number;
-  cancellationRate: number;
-  onTimeRate: number;
-  avgDelay: number;
+export interface PhaseSlice {
+  status: string;
+  label: string;
+  color: string;
+  count: number;
 }
 
-export interface AirlineStat {
+export interface RealAirlineStat {
   code: string;
   name: string;
   color: string;
-  total: number;
-  completed: number;
-  cancelled: number;
-  delayed: number;
-  inFlight: number;
-  cancelRate: number;
-  onTimeRate: number;
+  inAirNow: number;
+  detectedToday: number; // icao24 distintos vistos hoje (live_traffic)
 }
 
-export interface HourlyPoint {
-  hour: string;
-  total: number;
-  completed: number;
-  cancelled: number;
-  delayed: number;
-}
-
-export interface RouteStat {
+export interface RealRouteStat {
   route: string;
   origin: string;
   destination: string;
-  total: number;
-  completed: number;
-  cancelled: number;
-  cancelRate: number;
+  flights: number; // voos reais na janela recente
 }
 
-export interface MapFlight {
-  id: number;
-  flightNumber: string;
-  airlineCode: string;
-  airlineColor: string;
-  originCode: string;
-  destinationCode: string;
-  progress: number; // 0..1 do trecho percorrido
-  delayMinutes: number;
-  blockMinutes: number;
+// ---- Insights operacionais ----
+
+export interface Insight {
+  id: string;
+  severity: "success" | "info" | "warning" | "critical";
+  title: string;
+  detail: string;
+  metric?: string;
 }
 
-export interface AirportActivity {
+export interface AirportActivityReal {
   code: string;
-  active: number; // voos em andamento relacionados ao aeroporto
-  cancelledToday: number;
+  approach: number;
+  ground: number;
 }
 
 export interface PipelineInfo {
@@ -100,27 +148,27 @@ export interface PipelineInfo {
     cancelled: number;
   } | null;
   totalRuns: number;
-  totalFlights: number;
+  adsbSnapshots: number; // linhas em live_traffic
   totalEvents: number;
 }
 
 export interface DashboardData {
   generatedAt: string;
-  kpis: Kpis;
-  statusDistribution: { status: string; label: string; color: string; count: number }[];
-  airlines: AirlineStat[];
-  hourly: HourlyPoint[];
-  topRoutes: RouteStat[];
-  mapFlights: MapFlight[];
-  airportActivity: AirportActivity[];
-  recentFlights: FlightRow[];
+  source: LiveTrafficData["source"];
+  auth: LiveTrafficData["auth"];
+  stale: boolean;
+  cacheAgeSec: number;
+  kpis: RealKpis;
+  phases: PhaseSlice[];
+  airlines: RealAirlineStat[];
+  hourly: { hour: string; aircraft: number }[];
+  topRoutes: RealRouteStat[];
+  aircraft: LiveAircraft[];
   events: EventRow[];
   pipeline: PipelineInfo;
-}
-
-export interface FlightsPage {
-  flights: FlightRow[];
-  total: number;
-  page: number;
-  pages: number;
+  recentFlightsAvailable: boolean;
+  insights: Insight[];
+  pressureScore: number;
+  airportActivity: AirportActivityReal[];
+  trails: Trail[];
 }
