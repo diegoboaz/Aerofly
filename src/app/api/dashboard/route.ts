@@ -8,23 +8,38 @@ import {
 } from "@/lib/aviation";
 import {
   getLiveTraffic,
-  getRecentRealFlights,
+  getRouteDerivedStats,
   getTrails,
+  getAdsbProviderHealth,
 } from "@/lib/liveTraffic";
 import { buildInsights } from "@/lib/insights";
-import { estimateDestination } from "@/lib/geo";
+import { bearingDeg, destinationPoint, estimateDestination } from "@/lib/geo";
+import { getWeather } from "@/lib/weather";
+import { enrichRoutes } from "@/lib/routes";
+import { evaluateAlerts, getRecentAlerts } from "@/lib/alerts";
+import { jsonResponse } from "@/lib/http";
 import { startOfSpDay } from "@/lib/time";
 import type { DashboardData, EventRow, RealRouteStat } from "@/lib/types";
 import { desc, sql } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
-    const [traffic, recent, trails, recentEvents, lastRuns, agg] = await Promise.all([
-      getLiveTraffic(),
-      getRecentRealFlights(),
+    // motor de alertas em background (never bloqueia a resposta)
+    void evaluateAlerts().catch(() => undefined);
+
+    const [traffic, derived, trails, weather, recentEvents, lastRuns, agg, recentAlerts] =
+      await Promise.all([
+        // degrada com elegancia: se a fonte ADS-B cair por completo, o
+        // dashboard continua servindo clima, histórico e eventos.
+      getLiveTraffic().catch((err) => {
+        console.warn("[dashboard] fonte ADS-B indisponível:", err);
+        return null;
+      }),
+      getRouteDerivedStats(),
       getTrails(75),
+      getWeather().catch(() => null),
       db.select().from(flightEvents).orderBy(desc(flightEvents.createdAt)).limit(45),
       db.select().from(pipelineRuns).orderBy(desc(pipelineRuns.createdAt)).limit(1),
       db.execute(sql`
@@ -33,9 +48,27 @@ export async function GET() {
           (SELECT COUNT(*)::int FROM flight_events) AS total_events,
           (SELECT COUNT(*)::int FROM pipeline_runs) AS total_runs
       `),
+      getRecentAlerts(20),
     ]);
 
+    const sourceAvailable = traffic !== null;
+    const live = traffic ?? {
+      updatedAt: new Date().toISOString(),
+      source: "opensky" as const,
+      auth: "anonymous" as const,
+      count: 0,
+      airborne: 0,
+      onGround: 0,
+      stale: true,
+      cacheAgeSec: 0,
+      aircraft: [],
+    };
+
     const startToday = startOfSpDay(0);
+
+    // Rotas reais por callsign (ADSBDB, cache 24h). Isso substitui a
+    // dependencia do /flights/all limitado do OpenSky.
+    const routedAircraft = await enrichRoutes(live.aircraft);
 
     // ----- fases reais de voo (razao vertical + solo) -----
     const phaseCount: Record<string, number> = {
@@ -44,7 +77,7 @@ export async function GET() {
       descent: 0,
       ground: 0,
     };
-    for (const a of traffic.aircraft) phaseCount[flightPhase(a)]++;
+    for (const a of routedAircraft) phaseCount[flightPhase(a)]++;
     const phases = Object.entries(REAL_PHASE_META).map(([status, meta]) => ({
       status,
       label: meta.label,
@@ -67,7 +100,7 @@ export async function GET() {
       code: a.code,
       name: a.name,
       color: a.color,
-      inAirNow: traffic.aircraft.filter((x) => x.airline === a.code && !x.onGround)
+      inAirNow: routedAircraft.filter((x) => x.airline === a.code && !x.onGround)
         .length,
       detectedToday: detectedToday.get(a.code) ?? 0,
     })).sort((x, y) => y.inAirNow - x.inAirNow);
@@ -102,13 +135,11 @@ export async function GET() {
       r.flights++;
       routeMap.set(key, r);
     };
-    for (const f of recent.flights) {
-      bump(
-        f.fromIcao ? (ICAO_TO_IATA[f.fromIcao] ?? null) : null,
-        f.toIcao ? (ICAO_TO_IATA[f.toIcao] ?? null) : null,
-      );
+    // rotas derivadas do NOSSO historico real (90 min) + rotas IATA do FR24
+    for (const r of derived.routes) {
+      for (let i = 0; i < r.count; i++) bump(r.from, r.to);
     }
-    for (const a of traffic.aircraft) {
+    for (const a of routedAircraft) {
       if (a.origIata && a.destIata) bump(a.origIata, a.destIata);
     }
     const topRoutes = [...routeMap.values()]
@@ -116,7 +147,7 @@ export async function GET() {
       .slice(0, 6);
 
     // ----- KPIs reais -----
-    const airborneAltM = traffic.aircraft
+    const airborneAltM = routedAircraft
       .filter((a) => !a.onGround && a.altM !== null)
       .map((a) => a.altM!)
       .sort((x, y) => x - y);
@@ -137,24 +168,100 @@ export async function GET() {
 
     const totals = (agg.rows as Record<string, number>[])[0] ?? {};
 
-    // ----- insights operacionais (regras sobre dados reais) -----
+    // ----- precisao: dead-reckoning + rumo do rastro + confianca -----
+    const trailTrackByHex = new Map<string, number>();
+    for (const t of trails) {
+      if (t.points.length < 2) continue;
+      // usa os ultimos pontos do rastro: rumo medio mais estavel que a proa
+      const seg = t.points.slice(-4);
+      const [lat1, lon1] = seg[0];
+      const [lat2, lon2] = seg[seg.length - 1];
+      if (lat1 !== lat2 || lon1 !== lon2) {
+        trailTrackByHex.set(t.hex, bearingDeg(lat1, lon1, lat2, lon2));
+      }
+    }
+
+    const preciseAircraft = routedAircraft.map((a) => {
+      const trailTrack = trailTrackByHex.get(a.hex) ?? null;
+      // compensa a idade do fix ADS-B projetando a posicao no circulo maximo
+      let lat = a.lat;
+      let lon = a.lon;
+      const age = a.posAgeSec ?? null;
+      if (
+        !a.onGround &&
+        age !== null &&
+        age > 5 &&
+        age < 900 &&
+        a.speedKmh &&
+        a.track !== null
+      ) {
+        const km = (a.speedKmh / 3600) * age;
+        const p = destinationPoint(a.lat, a.lon, a.track, km);
+        lat = p.lat;
+        lon = p.lon;
+      }
+      const est = a.destIata
+        ? null
+        : estimateDestination(
+            { lat, lon, track: a.track, altM: a.altM, vsMs: a.vsMs, onGround: a.onGround },
+            trailTrack,
+          );
+      return {
+        ...a,
+        // ~11 m de precisao: suficiente para o mapa e reduz o JSON
+        lat: Math.round(lat * 10000) / 10000,
+        lon: Math.round(lon * 10000) / 10000,
+        track: a.track === null ? null : Math.round(a.track * 10) / 10,
+        trailTrack: trailTrack === null ? null : Math.round(trailTrack),
+        destEstimate: est?.code ?? null,
+        destConfidence: est?.confidence ?? null,
+      };
+    });
+
+    // ----- insights operacionais (regras sobre dados reais + clima) -----
     const { insights, pressureScore, airportActivity } = buildInsights(
-      traffic.aircraft,
+      preciseAircraft,
       hourly,
       events,
+      weather,
     );
+
+    const openHealth = getAdsbProviderHealth();
+    const fr24Configured = Boolean(process.env.FR24_API_TOKEN);
+    const providerHealth = [
+      {
+        name: "flightradar24",
+        configured: fr24Configured,
+        status: (live.source === "flightradar24"
+          ? "online"
+          : fr24Configured
+            ? "idle"
+            : "unconfigured") as
+          | "online"
+          | "idle"
+          | "unconfigured",
+        latencyMs: null,
+        successfulRegions: live.source === "flightradar24" ? 1 : 0,
+        totalRegions: 1,
+        aircraft: live.source === "flightradar24" ? live.count : 0,
+        lastSuccessAt:
+          live.source === "flightradar24" ? live.updatedAt : null,
+        error: null,
+      },
+      ...openHealth,
+    ];
 
     const data: DashboardData = {
       generatedAt: new Date().toISOString(),
-      source: traffic.source,
-      auth: traffic.auth,
-      stale: traffic.stale,
-      cacheAgeSec: traffic.cacheAgeSec,
+      source: live.source,
+      auth: live.auth,
+      stale: live.stale,
+      cacheAgeSec: live.cacheAgeSec,
       kpis: {
-        trackedNow: traffic.count,
-        airborne: traffic.airborne,
-        onGround: traffic.onGround,
-        recent90min: recent.available ? recent.flights.length : null,
+        trackedNow: live.count,
+        airborne: live.airborne,
+        onGround: live.onGround,
+        recent90min: derived.activeAircraft > 0 ? derived.activeAircraft : null,
         monitoredAirborne: airlines.reduce((s, a) => s + a.inAirNow, 0),
         medianFlightLevel: medianAltM
           ? Math.round((medianAltM * 3.28084) / 100)
@@ -164,20 +271,7 @@ export async function GET() {
       airlines,
       hourly,
       topRoutes,
-      aircraft: traffic.aircraft.map((a) => ({
-        ...a,
-        // destino real do FR24 tem prioridade; senao, estima pela trajetoria
-        destEstimate: a.destIata
-          ? null
-          : estimateDestination({
-              lat: a.lat,
-              lon: a.lon,
-              track: a.track,
-              altM: a.altM,
-              vsMs: a.vsMs,
-              onGround: a.onGround,
-            }),
-      })),
+      aircraft: preciseAircraft,
       events,
       pipeline: {
         lastRun: lastRuns[0]
@@ -195,16 +289,27 @@ export async function GET() {
         adsbSnapshots: totals.snapshots ?? 0,
         totalEvents: totals.total_events ?? 0,
       },
-      recentFlightsAvailable: recent.available,
+      recentFlightsAvailable: derived.activeAircraft > 0,
       insights,
       pressureScore,
       airportActivity,
       trails,
+      weather,
+      sourceAvailable,
+      alerts: recentAlerts.map((a) => ({
+        id: a.id,
+        kind: a.kind,
+        severity: a.severity as "info" | "warning" | "critical",
+        title: a.title,
+        message: a.message,
+        airport: a.airport,
+        flightNumber: a.flightNumber,
+        createdAt: a.createdAt.toISOString(),
+      })),
+      providerHealth,
     };
 
-    return Response.json(data, {
-      headers: { "Cache-Control": "no-store" },
-    });
+    return jsonResponse(data, req);
   } catch (err) {
     console.error("dashboard error", err);
     return Response.json(

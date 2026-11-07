@@ -14,6 +14,10 @@ import { db } from "@/db";
 import { flightEvents, liveTraffic } from "@/db/schema";
 import { sql } from "drizzle-orm";
 import { fetchFr24Brazil, fr24Configured } from "./flightRadar";
+import { fetchOpenAdsbBrazil, getAdsbProviderHealth } from "./adsbOpen";
+
+export { getAdsbProviderHealth };
+import { nearestAirport } from "./geo";
 import type {
   LiveAircraft,
   LiveTrafficData,
@@ -97,6 +101,8 @@ async function fetchOpenSkyBrazil(): Promise<{
     if (typeof lat !== "number" || typeof lon !== "number") continue;
     const callsign = typeof s[1] === "string" && s[1].trim() ? s[1].trim() : null;
     const speed = typeof s[9] === "number" ? s[9] : null;
+    // s[3] = time_position (epoch s) — idade real do fix ADS-B
+    const timePos = typeof s[3] === "number" ? s[3] : null;
     aircraft.push({
       hex: String(s[0]),
       callsign,
@@ -109,6 +115,10 @@ async function fetchOpenSkyBrazil(): Promise<{
       track: typeof s[10] === "number" ? s[10] : null,
       vsMs: typeof s[11] === "number" ? s[11] : null,
       onGround: s[8] === true,
+      posAgeSec:
+        timePos !== null
+          ? Math.max(0, Math.round(Date.now() / 1000 - timePos))
+          : null,
     });
   }
   return { aircraft, auth: token ? "oauth2" : "anonymous" };
@@ -314,13 +324,17 @@ export async function getTrails(minutes = 75): Promise<Trail[]> {
         byHex.set(r.icao24, t);
       }
       const last = t.points.at(-1);
-      // descarta pontos repetidos/estaticos
+      // descarta pontos repetidos/estaticos e reduz precisao (~100m)
+      // para encolher o payload sem perda visual
       if (
         !last ||
         Math.abs(last[0] - r.lat) > 0.012 ||
         Math.abs(last[1] - r.lon) > 0.012
       ) {
-        t.points.push([Number(r.lat), Number(r.lon)]);
+        t.points.push([
+          Math.round(Number(r.lat) * 1000) / 1000,
+          Math.round(Number(r.lon) * 1000) / 1000,
+        ]);
       }
     }
 
@@ -338,6 +352,102 @@ export async function getTrails(minutes = 75): Promise<Trail[]> {
   } catch (err) {
     console.warn("[live-traffic] falha ao carregar rastros:", err);
     return [];
+  }
+}
+
+// ------- estatisticas dos ultimos 90 min (dados PROPRIOS reais) -------
+interface DerivedStats {
+  activeAircraft: number;
+  routes: { from: string; to: string; count: number }[];
+}
+let derivedCache: { at: number; data: DerivedStats } | null = null;
+const DERIVED_TTL_MS = 600_000; // 10 min
+
+/**
+ * Deriva voos/rotas dos ultimos 90 min do NOSSO historico (live_traffic):
+ * origem = aeroporto proximo ao 1º ponto (ou em solo), destino = idem no ultimo.
+ * Independe do OpenSky (que restringe o historico no modo anonimo).
+ */
+export async function getRouteDerivedStats(): Promise<DerivedStats> {
+  if (derivedCache && Date.now() - derivedCache.at < DERIVED_TTL_MS) {
+    return derivedCache.data;
+  }
+  try {
+    const [aggRes, firstRes, lastRes] = await Promise.all([
+      db.execute(sql`
+        SELECT COUNT(DISTINCT icao24)::int AS n
+        FROM live_traffic
+        WHERE seen_at > now() - interval '90 minutes'
+      `),
+      db.execute(sql`
+        SELECT DISTINCT ON (icao24) icao24, lat, lon, on_ground
+        FROM live_traffic
+        WHERE seen_at > now() - interval '90 minutes'
+        ORDER BY icao24, seen_at ASC
+      `),
+      db.execute(sql`
+        SELECT DISTINCT ON (icao24) icao24, lat, lon, on_ground
+        FROM live_traffic
+        WHERE seen_at > now() - interval '90 minutes'
+        ORDER BY icao24, seen_at DESC
+      `),
+    ]);
+
+    const firstMap = new Map<
+      string,
+      { lat: number; lon: number; ground: boolean }
+    >();
+    for (const r of firstRes.rows as unknown as {
+      icao24: string;
+      lat: number;
+      lon: number;
+      on_ground: boolean;
+    }[]) {
+      firstMap.set(r.icao24, { lat: Number(r.lat), lon: Number(r.lon), ground: Boolean(r.on_ground) });
+    }
+
+    const routes = new Map<string, number>();
+    for (const r of lastRes.rows as unknown as {
+      icao24: string;
+      lat: number;
+      lon: number;
+      on_ground: boolean;
+    }[]) {
+      const f = firstMap.get(r.icao24);
+      if (!f) continue;
+      // origem: ponto inicial em solo (atolamento) ou a <= 15 km
+      const oNear = nearestAirport(f.lat, f.lon);
+      const dNear = nearestAirport(Number(r.lat), Number(r.lon));
+      const origOk =
+        oNear && (f.ground ? oNear.distKm <= 25 : oNear.distKm <= 15);
+      const destOk =
+        dNear && (Boolean(r.on_ground) ? dNear.distKm <= 25 : dNear.distKm <= 15);
+      if (!origOk || !destOk || !oNear || !dNear) continue;
+      if (oNear.code === dNear.code) continue;
+      // aeronave precisa ter voado entre os dois pontos
+      const flown = Math.abs(f.lat - Number(r.lat)) + Math.abs(f.lon - Number(r.lon));
+      if (flown < 0.5) continue;
+      const key = `${oNear.code}→${dNear.code}`;
+      routes.set(key, (routes.get(key) ?? 0) + 1);
+    }
+
+    const data: DerivedStats = {
+      activeAircraft: Number(
+        (aggRes.rows as unknown as { n: number }[])[0]?.n ?? 0,
+      ),
+      routes: [...routes.entries()]
+        .map(([k, count]) => {
+          const [from, to] = k.split("→");
+          return { from, to, count };
+        })
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 8),
+    };
+    derivedCache = { at: Date.now(), data };
+    return data;
+  } catch (err) {
+    console.warn("[live-traffic] estatísticas de 90 min indisponíveis:", err);
+    return { activeAircraft: 0, routes: [] };
   }
 }
 
@@ -372,6 +482,30 @@ async function fetchLiveTraffic(): Promise<LiveTrafficData> {
     }
   }
 
+  // 2) rede ADS-B aberta (adsb.lol / adsb.fi) — alta precisao, sem chave
+  try {
+    const open = await fetchOpenAdsbBrazil();
+    await emitRealEvents(open.aircraft);
+    await persistSnapshot(open.aircraft, open.provider);
+    return {
+      updatedAt: new Date().toISOString(),
+      source: open.provider as LiveTrafficData["source"],
+      auth: "open",
+      count: open.aircraft.length,
+      airborne: open.aircraft.filter((a) => !a.onGround).length,
+      onGround: open.aircraft.filter((a) => a.onGround).length,
+      stale: false,
+      cacheAgeSec: 0,
+      aircraft: open.aircraft,
+    };
+  } catch (err) {
+    console.warn(
+      "[live-traffic] ADS-B aberto falhou, tentando OpenSky:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  // 3) OpenSky (ultimo recurso)
   const os = await fetchOpenSkyBrazil();
   await emitRealEvents(os.aircraft);
   await persistSnapshot(os.aircraft, "opensky");
@@ -399,7 +533,7 @@ async function loadLatestSnapshotFromDb(): Promise<LiveTrafficData | null> {
           source, orig_iata, dest_iata,
           extract(epoch from seen_at)::bigint AS ts
         FROM live_traffic
-        WHERE seen_at > now() - interval '60 minutes'
+        WHERE seen_at > now() - interval '6 hours'
         ORDER BY icao24, seen_at DESC
       `)
     ).rows as unknown as Record<string, string | number | boolean | null>[];
@@ -444,26 +578,45 @@ async function loadLatestSnapshotFromDb(): Promise<LiveTrafficData | null> {
   }
 }
 
-/** Retorna o trafego real com cache (protege o limite das APIs) */
+let inFlight: Promise<LiveTrafficData> | null = null;
+
+/** Dispara (ou reaproveita) uma coleta em background */
+function revalidate(): Promise<LiveTrafficData> {
+  if (!inFlight) {
+    inFlight = fetchLiveTraffic()
+      .then((data) => {
+        cache = { at: Date.now(), data };
+        return data;
+      })
+      .finally(() => {
+        inFlight = null;
+      });
+  }
+  return inFlight;
+}
+
+/**
+ * Trafego real com estrategia stale-while-revalidate:
+ * responde na hora com o cache e atualiza em background — o usuario
+ * nunca espera a fonte externa (que pode levar segundos).
+ */
 export async function getLiveTraffic(): Promise<LiveTrafficData> {
-  if (cache && Date.now() - cache.at < TTL_MS) {
+  if (cache) {
+    const ageMs = Date.now() - cache.at;
+    if (ageMs >= TTL_MS) {
+      // nao await: revalida em background
+      void revalidate().catch(() => undefined);
+    }
     return {
       ...cache.data,
-      cacheAgeSec: Math.round((Date.now() - cache.at) / 1000),
+      cacheAgeSec: Math.round(ageMs / 1000),
+      stale: cache.data.stale || ageMs >= TTL_MS,
     };
   }
   try {
-    const data = await fetchLiveTraffic();
-    cache = { at: Date.now(), data };
-    return data;
+    // primeira carga do processo: precisa aguardar a fonte
+    return await revalidate();
   } catch (err) {
-    if (cache) {
-      return {
-        ...cache.data,
-        stale: true,
-        cacheAgeSec: Math.round((Date.now() - cache.at) / 1000),
-      };
-    }
     // fonte fora do ar e sem cache em memoria: usa o ultimo snapshot real
     const fromDb = await loadLatestSnapshotFromDb();
     if (fromDb) {

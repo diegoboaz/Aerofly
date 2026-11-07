@@ -31,6 +31,20 @@ export interface LiveAircraft {
   destIata?: string | null;
   /** destino estimado pela trajetoria quando a fonte nao informa a rota */
   destEstimate?: string | null;
+  /** confianca (%) da estimativa de destino */
+  destConfidence?: number | null;
+  /** idade da posicao ADS-B em segundos (precisao do dado) */
+  posAgeSec?: number | null;
+  /** rumo medio derivado do rastro real (mais estavel que a proa) */
+  trailTrack?: number | null;
+  /** matricula da aeronave (ex.: PR-GZH) */
+  registration?: string | null;
+  /** modelo ICAO (ex.: B738 = Boeing 737-800) */
+  aircraftType?: string | null;
+  /** codigo transponder */
+  squawk?: string | null;
+  /** raio de contencao da posicao em metros (precisao do fix) */
+  accuracyM?: number | null;
 }
 
 /** Rastro real percorrido por uma aeronave (histórico de posições) */
@@ -41,10 +55,33 @@ export interface Trail {
   points: [number, number][]; // [lat, lon]
 }
 
+export interface ProviderHealth {
+  name: string;
+  configured: boolean;
+  status:
+    | "unconfigured"
+    | "idle"
+    | "loading"
+    | "online"
+    | "partial"
+    | "offline";
+  latencyMs: number | null;
+  successfulRegions: number;
+  totalRegions: number;
+  aircraft: number;
+  lastSuccessAt: string | null;
+  error: string | null;
+}
+
 export interface LiveTrafficData {
   updatedAt: string;
-  source: "opensky" | "flightradar24";
-  auth: "oauth2" | "anonymous" | "api-key";
+  source:
+    | "opensky"
+    | "flightradar24"
+    | "flyitalyadsb"
+    | "adsb.lol"
+    | "adsb.fi";
+  auth: "oauth2" | "anonymous" | "api-key" | "open";
   count: number;
   airborne: number;
   onGround: number;
@@ -121,6 +158,54 @@ export interface RealRouteStat {
   flights: number; // voos reais na janela recente
 }
 
+// ---- Meteorologia real (Open-Meteo) ----
+
+export type WeatherSeverity = "ok" | "watch" | "warning" | "severe";
+
+export interface AirportWeather {
+  code: string;
+  city: string;
+  lat: number;
+  lon: number;
+  tempC: number;
+  condition: string;
+  weatherCode: number;
+  storm: boolean;
+  precipMm: number;
+  rainProbability: number | null;
+  cloudCover: number;
+  windKmh: number;
+  windDir: number;
+  windCardinal: string;
+  gustKmh: number;
+  visibilityM: number | null;
+  cape: number | null;
+  severity: WeatherSeverity;
+  reasons: string[];
+  observedAt: string;
+}
+
+export interface WeatherData {
+  updatedAt: string;
+  provider: "open-meteo";
+  stale: boolean;
+  airports: AirportWeather[];
+  alertCount: number;
+}
+
+// ---- Alertas operacionais ----
+
+export interface AlertRow {
+  id: number;
+  kind: string;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  message: string;
+  airport: string | null;
+  flightNumber: string | null;
+  createdAt: string;
+}
+
 // ---- Insights operacionais ----
 
 export interface Insight {
@@ -171,4 +256,9 @@ export interface DashboardData {
   pressureScore: number;
   airportActivity: AirportActivityReal[];
   trails: Trail[];
+  weather: WeatherData | null;
+  /** false quando a fonte ADS-B está fora do ar (UI degrada com aviso) */
+  sourceAvailable: boolean;
+  alerts: AlertRow[];
+  providerHealth: ProviderHealth[];
 }

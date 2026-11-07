@@ -6,6 +6,7 @@ import {
   integer,
   real,
   boolean,
+  jsonb,
   timestamp,
   index,
 } from "drizzle-orm/pg-core";
@@ -104,6 +105,54 @@ export const liveTraffic = pgTable(
   (t) => [index("live_traffic_seen_idx").on(t.seenAt)],
 );
 
+/**
+ * Alertas operacionais reais gerados pelo motor de regras
+ * (emergencias por squawk, meteorologia severa, congestionamento).
+ */
+/** Cache de rotas reais por callsign (ADSBDB, sem chave). */
+export const routeCache = pgTable(
+  "route_cache",
+  {
+    callsign: text("callsign").primaryKey(),
+    airlineName: text("airline_name"),
+    originIata: text("origin_iata"),
+    originIcao: text("origin_icao"),
+    originName: text("origin_name"),
+    destinationIata: text("destination_iata"),
+    destinationIcao: text("destination_icao"),
+    destinationName: text("destination_name"),
+    source: text("source").notNull().default("adsbdb"),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index("route_cache_updated_idx").on(t.updatedAt)],
+);
+
+export const alerts = pgTable(
+  "alerts",
+  {
+    id: serial("id").primaryKey(),
+    kind: text("kind").notNull(),
+    severity: text("severity").notNull(), // info | warning | critical
+    dedupKey: text("dedup_key").notNull(),
+    title: text("title").notNull(),
+    message: text("message").notNull(),
+    airport: text("airport"),
+    flightNumber: text("flight_number"),
+    context: jsonb("context"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("alerts_created_idx").on(t.createdAt),
+    index("alerts_dedup_idx").on(t.kind, t.dedupKey),
+  ],
+);
+
+export type RouteCacheRow = typeof routeCache.$inferSelect;
+export type Alert = typeof alerts.$inferSelect;
 export type Airline = typeof airlines.$inferSelect;
 export type Airport = typeof airports.$inferSelect;
 export type FlightEvent = typeof flightEvents.$inferSelect;

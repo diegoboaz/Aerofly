@@ -9,8 +9,9 @@ export default function TopRoutes({ routes }: { routes: RealRouteStat[] }) {
   if (routes.length === 0) {
     return (
       <div className="grid min-h-0 flex-1 place-items-center px-4 text-center text-[11px] leading-relaxed text-slate-500">
-        Aguardando rotas reais — disponíveis via FlightRadar24 “full”
-        (FR24_API_TOKEN) ou OpenSky /flights/all.
+        Rotas derivadas do histórico ADS-B próprio (voos completos registrados
+        nas últimas 90 min) — aparecem conforme a pipeline acumula, ou na hora
+        com <code className="text-slate-400">FR24_API_TOKEN</code>.
       </div>
     );
   }

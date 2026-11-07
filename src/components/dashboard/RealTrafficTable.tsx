@@ -41,6 +41,8 @@ export default function RealTrafficTable({ aircraft }: { aircraft: LiveAircraft[
         (a) =>
           (a.callsign ?? "").toUpperCase().includes(query) ||
           (a.flightNumber ?? "").toUpperCase().includes(query) ||
+          (a.registration ?? "").toUpperCase().includes(query) ||
+          (a.aircraftType ?? "").toUpperCase().includes(query) ||
           a.hex.toUpperCase().includes(query),
       );
     }
@@ -75,7 +77,7 @@ export default function RealTrafficTable({ aircraft }: { aircraft: LiveAircraft[
               setQ(e.target.value);
               setPage(1);
             }}
-            placeholder="Buscar callsign, voo ou hex…"
+            placeholder="Buscar callsign, matrícula, modelo ou hex…"
             className="h-8 w-56 rounded-lg border border-white/[0.08] bg-white/[0.03] pl-8 pr-3 text-xs text-slate-200 outline-none transition-colors placeholder:text-slate-600 focus:border-cyan-400/40"
           />
         </div>
@@ -123,16 +125,18 @@ export default function RealTrafficTable({ aircraft }: { aircraft: LiveAircraft[
 
       {/* tabela */}
       <div className="min-h-0 flex-1 overflow-auto rounded-xl border border-white/[0.06]">
-        <table className="w-full min-w-[900px] border-collapse text-left text-xs">
+        <table className="w-full min-w-[1080px] border-collapse text-left text-xs">
           <thead className="sticky top-0 z-[1] bg-[#0a1120]/95 backdrop-blur">
             <tr className="border-b border-white/[0.07] text-[10px] uppercase tracking-[0.14em] text-slate-500">
               <th className="px-4 py-2.5 font-semibold">Callsign</th>
-              <th className="px-4 py-2.5 font-semibold">Voo</th>
+              <th className="px-4 py-2.5 font-semibold">Matrícula</th>
+              <th className="px-4 py-2.5 font-semibold">Modelo</th>
               <th className="px-4 py-2.5 font-semibold">Companhia</th>
               <th className="px-4 py-2.5 font-semibold">Rota</th>
               <th className="px-4 py-2.5 font-semibold">Nível</th>
               <th className="px-4 py-2.5 font-semibold">Velocidade</th>
               <th className="px-4 py-2.5 font-semibold">Razão vertical</th>
+              <th className="px-4 py-2.5 font-semibold">Precisão</th>
               <th className="px-4 py-2.5 font-semibold">Fase</th>
             </tr>
           </thead>
@@ -142,10 +146,14 @@ export default function RealTrafficTable({ aircraft }: { aircraft: LiveAircraft[
                 ? AIRLINES.find((x) => x.code === a.airline)
                 : null;
               const fl = a.altM ? Math.round((a.altM * 3.28084) / 100) : null;
+              const emergency =
+                a.squawk === "7700" || a.squawk === "7600" || a.squawk === "7500";
               return (
                 <tr
                   key={a.hex}
-                  className="border-b border-white/[0.04] transition-colors hover:bg-white/[0.03]"
+                  className={`border-b border-white/[0.04] transition-colors hover:bg-white/[0.03] ${
+                    emergency ? "bg-rose-500/[0.08]" : ""
+                  }`}
                 >
                   <td className="px-4 py-2.5">
                     <span
@@ -154,9 +162,25 @@ export default function RealTrafficTable({ aircraft }: { aircraft: LiveAircraft[
                     >
                       {a.callsign ?? a.hex.toUpperCase()}
                     </span>
+                    {emergency && (
+                      <span
+                        className="chip ml-2 px-1.5 py-[1px] font-mono text-[9px]"
+                        style={{
+                          color: "#fb7185",
+                          background: "rgba(251,113,133,0.12)",
+                          borderColor: "rgba(251,113,133,0.35)",
+                        }}
+                        title={`Squawk de emergência ${a.squawk}`}
+                      >
+                        SQK {a.squawk}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-2.5 font-mono text-slate-400">
-                    {a.flightNumber ?? "—"}
+                    {a.registration ?? "—"}
+                  </td>
+                  <td className="px-4 py-2.5 font-mono text-slate-400">
+                    {a.aircraftType ?? "—"}
                   </td>
                   <td className="px-4 py-2.5 text-slate-400">
                     {airlineMeta?.name ?? a.country}
@@ -171,10 +195,12 @@ export default function RealTrafficTable({ aircraft }: { aircraft: LiveAircraft[
                     ) : a.destEstimate ? (
                       <span
                         className="text-amber-300/90"
-                        title="Destino estimado pela trajetória (rota não publicada pela fonte)"
+                        title={`Destino estimado pela trajetória${a.destConfidence ? ` — confiança ${a.destConfidence}%` : ""}`}
                       >
                         → {a.destEstimate}
-                        <span className="ml-1 text-[9px] text-slate-600">est.</span>
+                        <span className="ml-1 text-[9px] text-slate-600">
+                          {a.destConfidence ? `${a.destConfidence}%` : "est."}
+                        </span>
                       </span>
                     ) : (
                       <span className="text-slate-600">—</span>
@@ -197,6 +223,21 @@ export default function RealTrafficTable({ aircraft }: { aircraft: LiveAircraft[
                       <span className="text-slate-500">nivelada</span>
                     )}
                   </td>
+                  <td className="px-4 py-2.5 font-mono text-[10px]">
+                    {a.posAgeSec !== null && a.posAgeSec !== undefined ? (
+                      <span
+                        style={{ color: a.posAgeSec <= 15 ? "#34d399" : a.posAgeSec <= 60 ? "#7dd3fc" : "#fbbf24" }}
+                        title="Idade do fix ADS-B (quanto menor, mais precisa a posição)"
+                      >
+                        {a.posAgeSec}s
+                        {a.accuracyM ? (
+                          <span className="ml-1 text-slate-600">±{a.accuracyM}m</span>
+                        ) : null}
+                      </span>
+                    ) : (
+                      <span className="text-slate-600">—</span>
+                    )}
+                  </td>
                   <td className="px-4 py-2.5">
                     <PhaseBadge phase={flightPhase(a)} />
                   </td>
@@ -205,7 +246,7 @@ export default function RealTrafficTable({ aircraft }: { aircraft: LiveAircraft[
             })}
             {pageRows.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-4 py-10 text-center text-slate-500">
+                <td colSpan={10} className="px-4 py-10 text-center text-slate-500">
                   Nenhuma aeronave com os filtros aplicados.
                 </td>
               </tr>

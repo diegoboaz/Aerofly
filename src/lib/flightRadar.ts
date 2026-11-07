@@ -46,12 +46,21 @@ interface Fr24Raw {
   reg?: string | null;
   orig_iata?: string | null;
   dest_iata?: string | null;
+  timestamp?: string | number | null;
 }
 
 /** Matriculas brasileiras comecam com PP-, PR-, PS-, PT- ou PU- */
 function countryFromReg(reg: string | null | undefined): string {
   if (reg && /^P[PRSTU]/i.test(reg)) return "Brasil";
   return "FR24";
+}
+
+/** Idade (s) do fix de posicao reportado pela fonte */
+function fixAgeSec(ts: string | number | null | undefined): number | null {
+  if (ts === null || ts === undefined) return null;
+  const ms = typeof ts === "number" ? ts * 1000 : Date.parse(ts);
+  if (!Number.isFinite(ms)) return null;
+  return Math.max(0, Math.round((Date.now() - ms) / 1000));
 }
 
 function normalize(rows: Fr24Raw[]): LiveAircraft[] {
@@ -77,6 +86,7 @@ function normalize(rows: Fr24Raw[]): LiveAircraft[] {
       flightNumber: p.flight ?? null,
       origIata: p.orig_iata ?? null,
       destIata: p.dest_iata ?? null,
+      posAgeSec: fixAgeSec(p.timestamp),
     });
   }
   return out;

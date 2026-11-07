@@ -110,15 +110,15 @@ export default function KpiRow({ kpis }: { kpis: RealKpis }) {
         sub="sinal em aeroportos"
       />
       <KpiCard
-        label="Voos reais · 90 min"
+        label="Aeronaves · 90 min"
         value={kpis.recent90min ?? 0}
         displayOverride={kpis.recent90min === null ? "—" : undefined}
         icon={History}
         accent="#a78bfa"
         sub={
           kpis.recent90min === null
-            ? "restrita no modo anônimo — use FR24_API_TOKEN"
-            : "janela OpenSky /flights/all"
+            ? "acumulando histórico — pipeline ADS-B"
+            : "distintas detectadas (histórico próprio)"
         }
       />
       <KpiCard

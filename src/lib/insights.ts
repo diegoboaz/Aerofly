@@ -6,7 +6,7 @@
 // ============================================================
 
 import { AIRPORTS } from "./aviation";
-import type { EventRow, LiveAircraft } from "./types";
+import type { EventRow, LiveAircraft, WeatherData } from "./types";
 
 export type InsightSeverity = "success" | "info" | "warning" | "critical";
 
@@ -60,6 +60,7 @@ export function buildInsights(
   aircraft: LiveAircraft[],
   hourly: { hour: string; aircraft: number }[],
   events: EventRow[],
+  weather?: WeatherData | null,
 ): InsightsResult {
   const insights: Insight[] = [];
   const activity = new Map<string, AirportActivity>();
@@ -130,6 +131,63 @@ export function buildInsights(
         "Aeronaves em altitude média com velocidade reduzida — padrão compatível com espera ou vetoração longa. Impacto direto em combustível e atrasos.",
       metric: `${holdings} aeronave(s)`,
     });
+  }
+
+  // ---- 3b) METEOROLOGIA REAL cruzada com o trafego ----
+  if (weather) {
+    const adverse = weather.airports.filter(
+      (w) => w.severity === "severe" || w.severity === "warning",
+    );
+    for (const w of adverse.slice(0, 3)) {
+      const act = activity.get(w.code);
+      const exposed = (act?.approach ?? 0) + (act?.ground ?? 0);
+      const driver =
+        w.cape !== null && w.cape >= 2000
+          ? `CAPE ${Math.round(w.cape)} J/kg`
+          : w.gustKmh >= 45
+            ? `rajadas ${Math.round(w.gustKmh)} km/h`
+            : w.visibilityM !== null && w.visibilityM < 3000
+              ? `vis ${(w.visibilityM / 1000).toFixed(1)} km`
+              : w.condition;
+      insights.push({
+        id: `wx-${w.code}`,
+        severity: w.severity === "severe" ? "critical" : "warning",
+        title: `${w.storm ? "Tempestade" : "Risco meteorológico"} em ${w.code} · ${w.city}`,
+        detail:
+          `${w.condition}. ${w.reasons.join("; ")}.` +
+          (exposed > 0
+            ? ` ${exposed} aeronave(s) expostas agora — avaliar espera, arremetida e combustível extra.`
+            : " Avaliar impacto nas próximas chegadas e partidas."),
+        metric: driver,
+      });
+    }
+
+    // vento cruzado forte nos hubs (risco em pouso/decolagem)
+    const windy = weather.airports
+      .filter((w) => w.gustKmh >= 40)
+      .sort((a, b) => b.gustKmh - a.gustKmh)[0];
+    if (windy && !adverse.some((a) => a.code === windy.code)) {
+      insights.push({
+        id: "wx-wind",
+        severity: "info",
+        title: `Vento intenso em ${windy.code}`,
+        detail:
+          `Rajadas de ${windy.windCardinal} podem exigir correção de deriva e ` +
+          "aumentar o tempo entre pousos. Monitorar limites de vento de través.",
+        metric: `${Math.round(windy.gustKmh)} km/h · ${windy.windCardinal}`,
+      });
+    }
+
+    if (adverse.length === 0) {
+      insights.push({
+        id: "wx-ok",
+        severity: "success",
+        title: "Meteorologia favorável na malha",
+        detail:
+          "Nenhum aeroporto monitorado com tempestade, teto baixo ou vento crítico neste momento.",
+        metric: `${weather.airports.length} aeroportos avaliados`,
+      });
+    }
   }
 
   // ---- 4) Pico diario (historico real acumulado pela pipeline) ----
@@ -218,17 +276,29 @@ export function buildInsights(
   }
 
   // ---- Indice de Pressao Operacional (0-100) ----
+  // Pondera congestionamento, esperas, pico diario e METEOROLOGIA real.
   const approachTotal = airportActivity.reduce((s, a) => s + a.approach, 0);
   const groundTotal = airportActivity.reduce((s, a) => s + a.ground, 0);
+  const wxPenalty = weather
+    ? Math.min(
+        20,
+        weather.airports.reduce(
+          (s, w) =>
+            s + (w.severity === "severe" ? 8 : w.severity === "warning" ? 4 : 0),
+          0,
+        ),
+      )
+    : 0;
   const pressureScore = Math.min(
     100,
     Math.round(
-      Math.min(approachTotal / 8, 1) * 40 +
-        Math.min(groundTotal / 12, 1) * 25 +
-        Math.min(holdings / 6, 1) * 25 +
+      Math.min(approachTotal / 8, 1) * 34 +
+        Math.min(groundTotal / 12, 1) * 20 +
+        Math.min(holdings / 6, 1) * 20 +
         (currentHr && peak.aircraft > 0 && currentHr.aircraft >= peak.aircraft * 0.9
-          ? 10
-          : 0),
+          ? 6
+          : 0) +
+        wxPenalty,
     ),
   );
 
