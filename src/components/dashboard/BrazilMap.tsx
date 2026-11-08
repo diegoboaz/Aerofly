@@ -91,6 +91,7 @@ export default function BrazilMap({
   const brazilPathRef = useRef<Path2D | null>(null);
 
   const [hover, setHover] = useState<string | null>(null);
+  const hoverRef = useRef<string | null>(null);
   const [hoverAirport, setHoverAirport] = useState<string | null>(null);
   const hoverAirportRef = useRef<string | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -315,9 +316,11 @@ export default function BrazilMap({
       }
 
       // --- hit testing (hover) ---
+      // so desativa durante arrasto REAL; com o ponteiro apenas pressionado
+      // o alvo precisa continuar valido para o clique selecionar.
       const p = pointerRef.current;
       let nextHover: string | null = null;
-      if (p && !dragRef.current) {
+      if (p && !dragRef.current?.moved) {
         let bestD = HIT_RADIUS * HIT_RADIUS;
         for (const n of nodes) {
           const dx = n.sx - p.x;
@@ -331,12 +334,13 @@ export default function BrazilMap({
       }
       if (nextHover !== hoverHex) {
         hoverHex = nextHover;
+        hoverRef.current = nextHover;
         setHover(nextHover);
       }
 
       // hit testing de aeroportos (somente quando nao esta sobre aeronave)
       let nextAirport: string | null = null;
-      if (p && !nextHover && !dragRef.current) {
+      if (p && !nextHover && !dragRef.current?.moved) {
         let best = 13 * 13;
         for (const ap of airportGeom) {
           const ax = ap.x * v.scale + v.tx;
@@ -678,8 +682,54 @@ export default function BrazilMap({
     [zoomAt],
   );
 
+  /** O clique so vale quando comeca sobre o canvas (nao nos controles). */
+  const isCanvasTarget = (e: React.PointerEvent) =>
+    e.target === canvasRef.current;
+
+  /**
+   * Hit-test sincrono na posicao informada. Usado no clique/toque para nao
+   * depender do estado de hover (que nao existe em telas de toque).
+   */
+  const hitTestAt = useCallback(
+    (x: number, y: number): { hex: string | null; airport: string | null } => {
+      // tolerancia maior no clique/toque do que no hover
+      const tol = HIT_RADIUS + 6;
+      let hex: string | null = null;
+      let bestAc = tol * tol;
+      for (const n of fleetRef.current) {
+        const dx = n.sx - x;
+        const dy = n.sy - y;
+        const d = dx * dx + dy * dy;
+        if (d < bestAc) {
+          bestAc = d;
+          hex = n.hex;
+        }
+      }
+      if (hex) return { hex, airport: null };
+
+      const v = viewRef.current;
+      let airport: string | null = null;
+      let bestAp = 14 * 14;
+      for (const ap of airportGeom) {
+        const dx = ap.x * v.scale + v.tx - x;
+        const dy = ap.y * v.scale + v.ty - y;
+        const d = dx * dx + dy * dy;
+        if (d < bestAp) {
+          bestAp = d;
+          airport = ap.code;
+        }
+      }
+      return { hex: null, airport };
+    },
+    [airportGeom],
+  );
+
   const onPointerDown = useCallback((e: React.PointerEvent) => {
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    if (!isCanvasTarget(e)) return;
+    canvasRef.current?.setPointerCapture?.(e.pointerId);
+    const r = wrapRef.current!.getBoundingClientRect();
+    // em toque nao ha pointermove antes do toque: registra a posicao aqui
+    pointerRef.current = { x: e.clientX - r.left, y: e.clientY - r.top };
     dragRef.current = { x: e.clientX, y: e.clientY, moved: false };
   }, []);
 
@@ -701,28 +751,40 @@ export default function BrazilMap({
     }
   }, []);
 
-  const onPointerUp = useCallback(() => {
-    const d = dragRef.current;
-    dragRef.current = null;
-    setDragging(false);
-    if (d && !d.moved) {
-      if (hover) {
-        setSelected(hover);
-      } else if (hoverAirport) {
-        const ap = AIRPORTS.find((a) => a.code === hoverAirport);
+  const onPointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      const d = dragRef.current;
+      dragRef.current = null;
+      setDragging(false);
+      if (!d || d.moved) return;
+
+      const r = wrapRef.current!.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const y = e.clientY - r.top;
+      const hit = hitTestAt(x, y);
+
+      if (hit.hex) {
+        setSelected((prev) => (prev === hit.hex ? null : hit.hex));
+        return;
+      }
+      if (hit.airport) {
+        const ap = AIRPORTS.find((a) => a.code === hit.airport);
         if (ap) focusRegion(ap.lon, ap.lat, 5.2);
         setFollow(false);
-      } else {
-        setSelected(null);
-        setFollow(false);
+        return;
       }
-    }
-  }, [focusRegion, hover, hoverAirport]);
+      setSelected(null);
+      setFollow(false);
+    },
+    [focusRegion, hitTestAt],
+  );
 
   const onPointerLeave = useCallback(() => {
     pointerRef.current = null;
     dragRef.current = null;
+    hoverRef.current = null;
     setDragging(false);
+    setHover(null);
   }, []);
 
   // ---------- UI ----------
